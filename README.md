@@ -27,8 +27,9 @@ The rest of this README is the manual route, for people who prefer the Terminal.
 
 It writes to hardware as root. That deserves a minute of your time, so:
 
-- It is **one C file, ~450 lines**, with no dependencies. Read it: [`src/magicmousefix.c`](src/magicmousefix.c).
-- It only ever opens devices matching `VendorID 0x05AC` and a listed Magic Mouse product id. Your keyboards are never opened, let alone written to.
+- It is **one C file, about 520 lines**, with no dependencies. Read it: [`src/magicmousefix.c`](src/magicmousefix.c).
+- It only ever opens devices matching an Apple vendor id (`0x05AC` over USB, `0x004C` over Bluetooth) **and** a listed Magic Mouse product id, checked twice — once when asking macOS for devices, once on the device itself. Your keyboards are never opened, let alone written to.
+- It identifies your mouse by those hardware ids, **not by its name**, so it works whatever you have called your mouse and in any language.
 - It reads no input, makes no network call, writes no file and spawns no process. `make test` asserts all four against the source rather than asking you to take it on faith.
 - `--dry-run` shows you exactly what it would write to, and writes nothing.
 - Everything the installer puts on your system is listed in [`scripts/install.sh`](scripts/install.sh) and removed by [`scripts/uninstall.sh`](scripts/uninstall.sh).
@@ -85,7 +86,8 @@ behaviour on its next reconnect.
 - Language: C11, Apple clang, `-Wall -Wextra -Werror`
 - Frameworks: IOKit (`IOHIDManager`) and CoreFoundation. No third-party dependency, no package manager.
 - Daemon: launchd (`com.local.magicmousefix`), log rotation via newsyslog
-- Verified on: macOS 27.0 (build 26A428), arm64, Magic Mouse `0x05AC:0x0269` firmware 8.6.0
+- Verified on: macOS 27.0 (build 26A428), arm64, Magic Mouse product id `0x0269`, firmware 1.9.2,
+  over Bluetooth (vendor id `0x004C`) — `--dry-run` matches its 4 HID interfaces
 
 ## Prerequisites
 

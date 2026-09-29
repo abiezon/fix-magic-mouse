@@ -14,10 +14,10 @@ authority; changing it is out of scope here.
 
 | # | Upstream | Here | Why |
 |---|---|---|---|
-| 1 | `IOHIDManagerSetDeviceMatching(g_manager, NULL)` — matches **every** HID device, then filters by product name after the fact | `IOHIDManagerSetDeviceMatchingMultiple` with an explicit `VendorID 0x05AC` + product-id allow-list | `IOHIDManagerOpen` opens everything that matched. Upstream's root daemon therefore holds every keyboard on the machine open for its entire life, to talk to one mouse. The Operator's Mac has a Magic Keyboard in the same HID tree, so this is concrete, not theoretical. |
-| 2 | One gate: product name contains `Magic Mouse` | Two independent gates: the allow-list **and** the product name, re-checked on the device itself | A name check alone would send a feature report to any device calling itself "Magic Mouse". Re-checking on the device means a mistake in the matching dictionary still cannot turn into a write to other hardware. |
+| 1 | `IOHIDManagerSetDeviceMatching(g_manager, NULL)` — matches **every** HID device, then filters by product name after the fact | `IOHIDManagerSetDeviceMatchingMultiple` with an explicit Apple-vendor-id (`0x05AC` USB, `0x004C` Bluetooth) + product-id allow-list | `IOHIDManagerOpen` opens everything that matched. Upstream's root daemon therefore holds every keyboard on the machine open for its entire life, to talk to one mouse. The Operator's Mac has a Magic Keyboard in the same HID tree, so this is concrete, not theoretical. |
+| 2 | Identity is the product name containing `Magic Mouse` | Identity is the vendor id + product id, checked in the matching dictionary **and** re-checked on the device itself | Over Bluetooth the product string is the owner's editable device name — `Magic Mouse de Arlindo` on the reference machine, anything at all elsewhere — so upstream's name test skips any renamed or non-English mouse. The ids are burned into the hardware and identical on every Mac. Re-checking them on the device means an error building the dictionary still cannot become a write to other hardware. The name is reported, never required. |
 | 3 | No way to inspect before acting | `--dry-run` enumerates and reports, and cannot reach the send path | Running a stranger's code as root against your hardware should have a step where you can look first. |
-| 4 | Allow-list is implicit and unextendable | `--pid 0xNNNN` widens it explicitly at runtime | Narrowing the default costs coverage of an unlisted Magic Mouse variant. The escape hatch keeps that cost, but makes widening a deliberate act rather than the default posture. |
+| 4 | Allow-list is implicit and unextendable | `--pid 0xNNNN` widens it explicitly at runtime; every default id carries a citable source | Narrowing the default costs coverage of an unlisted variant, and the escape hatch keeps that cost while making widening deliberate. The defaults are `0x0269` (observed on the reference mouse) and `0x030D` / `0x0310`, which Apple's own `AppleBluetoothMultitouch.kext` Info.plist lists under `BNBMouseEventDriver`. `0x030E` is excluded: the same plist calls it `BNBTrackpadEventDriver`. |
 
 ## Correctness and robustness
 
@@ -46,7 +46,7 @@ authority; changing it is out of scope here.
 
 | # | Upstream | Here | Why |
 |---|---|---|---|
-| 18 | No tests | `tests/run.sh` — 24 cases | Argument and exit-code behaviour, plus "source guarantees": greps over the comment-stripped source asserting no network call, no file write, no subprocess and no input callback. It turns the reach and no-side-effects claims from prose in a README into something that fails the build. |
+| 18 | No tests | `tests/run.sh` — 30 cases | Argument and exit-code behaviour, plus "source guarantees": greps over the comment-stripped source asserting no network call, no file write, no subprocess and no input callback. It turns the reach and no-side-effects claims from prose in a README into something that fails the build. |
 | 19 | No lint target | `make lint` — `clang -fsyntax-only` plus the static analyzer; build is `-Wall -Wextra -Werror` | Upstream builds with `-Wall` only. |
 
 ## Things upstream is right about, and this repo keeps

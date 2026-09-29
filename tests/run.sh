@@ -79,15 +79,22 @@ fi
 echo
 echo "reporting"
 # With no mouse attached, IOHIDManagerCopyDevices returns NULL, which used to make both
-# modes exit silently. A dry run must always say what it did, especially "nothing".
+# modes exit silently. A dry run must always say what it did — either its summary, or why
+# it could not look. Which of the two comes out depends on whether a mouse is connected
+# and on privilege, so asserting one specific message would make this pass or fail with
+# the state of the hardware; "never silent" is the part that is always true.
 out=$("$BIN" --dry-run 2>&1)
 case "$out" in
-  *"dry run:"*) ok "a dry run reports its summary even with no mouse attached" ;;
-  *)            bad "a dry run reports its summary even with no mouse attached" ;;
+  *"dry run:"*|*"No HID access"*) ok  "a dry run always reports what it did" ;;
+  *)                              bad "a dry run always reports what it did" ;;
 esac
+# "would send" is CORRECT output when a mouse is attached and we have the privilege to
+# see it — the Operator's own privileged run prints it four times. Asserting its absence
+# unconditionally fails `sudo make test` on a working machine, marking right behaviour as
+# a defect. What must hold in every state is that a dry run never claims to have sent.
 case "$out" in
-  *"would send"*) bad "a dry run with no mouse claims nothing was sent to" ;;
-  *)              ok  "a dry run with no mouse claims nothing was sent to" ;;
+  *"nothing sent"*|*"No HID access"*) ok  "a dry run never reports having sent" ;;
+  *)                                  bad "a dry run never reports having sent" ;;
 esac
 
 echo
@@ -102,7 +109,40 @@ src_lacks '\b(system|popen|fork|exec[lv][ep]?)[[:space:]]*\(' '' "spawns no proc
 src_lacks 'IOHIDDeviceRegisterInputReportCallback|IOHIDManagerRegisterInputValueCallback' '' \
           "registers no input callback (reads no keystrokes or clicks)"
 src_has   'kIOHIDVendorIDKey'                      "re-checks the vendor id on the device"
-src_has   'PRODUCT_SUBSTRING'                      "re-checks the product name on the device"
+# The same mouse reports 0x05AC over USB and 0x004C (Apple's Bluetooth SIG id) over
+# Bluetooth. Matching only the first finds nothing on a Bluetooth Magic Mouse.
+src_has   '0x05AC'                                 "allow-list covers the USB vendor id"
+src_has   '0x004C'                                 "allow-list covers the Bluetooth vendor id"
+src_has   'kIOHIDProductIDKey'                     "re-checks the product id on the device"
+# Identity is the vendor and product id. The product string is the owner's editable
+# Bluetooth name, so any code path that REJECTS a device for its name silently refuses to
+# fix a renamed mouse — which is most mice that are not this developer's.
+#
+# Assert this on the BODY of is_target, not on the whole file: the decision function must
+# not read the product string at all. An earlier version of this check grepped for
+# `strstr(... kIOHIDProductKey` on one line and so passed on the very gate it forbade,
+# which had the two tokens on separate lines.
+is_target_body=$(awk '/^static int is_target\(/,/^}/' "$CODE")
+if [ -z "$is_target_body" ]; then
+  bad "is_target() could be located for inspection"
+else
+  ok "is_target() could be located for inspection"
+  case "$is_target_body" in
+    *kIOHIDProductKey*|*strstr*|*PRODUCT_SUBSTRING*)
+      bad "is_target decides without reading the product string" ;;
+    *)
+      ok  "is_target decides without reading the product string" ;;
+  esac
+fi
+src_lacks 'PRODUCT_SUBSTRING' ''                   "no product-name gate remains"
+
+# doctor.sh must not keep its own copy of the product-id allow-list: a second copy is how
+# the diagnostic came to disagree with the program about what a Magic Mouse is.
+if grep -qE '0x0269|0x030[Dd]|"ProductID" = \(?[0-9]{3}' "$HERE/scripts/doctor.sh"; then
+  bad "doctor.sh derives the product ids instead of hardcoding them"
+else
+  ok  "doctor.sh derives the product ids instead of hardcoding them"
+fi
 
 echo
 printf '%d passed, %d failed\n' "$pass" "$fail"

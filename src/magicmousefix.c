@@ -18,8 +18,10 @@
 //      internal keyboard, any Magic Keyboard, every USB receiver. That is the whole Input
 //      Monitoring surface held open for the life of a root daemon, to talk to one mouse.
 //      Here the manager never opens a device that is not on the allow-list.
-//   2. Two independent gates before a single byte is written: the device matched the
-//      VID/PID allow-list AND its product string contains "Magic Mouse".
+//   2. The allow-list is checked twice before a single byte is written: in the matching
+//      dictionary, and again on the device itself. Identity is the vendor id and product
+//      id only — never the product string, which on this device is the owner's editable
+//      Bluetooth name (see is_target).
 //   3. --dry-run enumerates and reports without sending anything. Run it first.
 //   4. The burst stops as soon as the mouse accepts the report, instead of writing to the
 //      device a fixed six times regardless.
@@ -60,17 +62,42 @@ static const uint8_t kEnableMultitouch[] = { 0xF1, 0x06, 0x01, 0x37 };
 
 // ---------------------------------------------------------------------------
 // Device allow-list. Nothing outside it is ever opened, let alone written to.
-// 0x0269 is confirmed on the reference machine (macOS 27.0, Mac mini M4); the other two
-// come from the Magic Mouse family as the Linux hid-magicmouse driver enumerates it.
+//
+// Every id here has a checkable source. An earlier version also carried 0x0323, written
+// from memory as a Magic Mouse variant; it appears in no source consulted since, and has
+// been removed. If you need it, --pid 0x0323 adds it deliberately.
+//
+//   0x0269  Magic Mouse 2. Observed directly on the reference machine
+//           (macOS 27.0 build 26A428, product id 0x0269, firmware 1.9.2).
+//   0x030D  Magic Mouse. Apple's own driver classifies it as a mouse:
+//           /System/Library/Extensions/AppleBluetoothMultitouch.kext/Contents/Info.plist
+//           lists ProductID 781 (0x030D) under the personality BNBMouseEventDriver.
+//   0x0310  Magic Mouse (2011). Same plist, personality "BNBMouseEventDriver 2011".
+//
+// Deliberately NOT here: 0x030E, which the same plist lists under
+// BNBTrackpadEventDriver. It is a Magic Trackpad, not a mouse.
+//
 // Extend at runtime with --pid 0xNNNN rather than widening the default.
 // ---------------------------------------------------------------------------
-#define APPLE_VENDOR_ID 0x05AC
+// Apple identifies itself with two different numbers, and which one a Magic Mouse reports
+// depends on how it is attached. 0x05AC is Apple's USB-IF vendor id; 0x004C is Apple's
+// Bluetooth SIG company id, and that is what the HID layer reports for a mouse connected
+// over Bluetooth — the normal case for this device. Matching only 0x05AC silently fails to
+// find the mouse it was written for.
+#define APPLE_VENDOR_ID_USB 0x05AC
+#define APPLE_VENDOR_ID_BT  0x004C
+
+static const int32_t kAppleVendorIds[] = { APPLE_VENDOR_ID_USB, APPLE_VENDOR_ID_BT };
+#define APPLE_VENDOR_COUNT (sizeof(kAppleVendorIds) / sizeof(kAppleVendorIds[0]))
+
 #define MAX_PIDS        16
 
-static int32_t g_pids[MAX_PIDS] = { 0x030D, 0x0269, 0x0323 };
+static int32_t g_pids[MAX_PIDS] = { 0x0269, 0x030D, 0x0310 };
 static size_t  g_pid_count      = 3;
 
-#define PRODUCT_SUBSTRING "Magic Mouse"
+// Shown when a device reports no product string at all. Nothing is ever decided from the
+// product string — see is_target.
+#define UNNAMED_DEVICE "(unnamed device)"
 
 // The driver is still settling when the device shows up, so retry a few times — but stop
 // as soon as the mouse answers, rather than writing a fixed number of times.
@@ -158,18 +185,33 @@ static int pid_allowed(int32_t pid) {
     return 0;
 }
 
-// Both gates. The matching dictionary should already have excluded everything else; this
-// re-checks on the device itself so a mistake in the dictionary cannot turn into a write
-// to some other piece of hardware.
+static int vendor_allowed(int32_t vid) {
+    for (size_t i = 0; i < APPLE_VENDOR_COUNT; i++)
+        if (kAppleVendorIds[i] == vid) return 1;
+    return 0;
+}
+
+// The device's identity is its vendor id and product id. Those are burned into the
+// hardware; they are what "this is a Magic Mouse" actually means, and they are the same
+// on every Mac in the world.
+//
+// The product STRING is not identity. On this device it is the owner's Bluetooth name —
+// "Magic Mouse de Arlindo" on the machine this was developed against, and just as legally
+// "Mouse do escritório", "Magic Mouse 2", or the same words in another language. An
+// earlier version of this program required that string to contain "Magic Mouse" and
+// called it a second gate. It was not a gate: a device spoofing Apple's vendor id and a
+// Magic Mouse product id would spoof the name too, so it stopped nothing — while silently
+// refusing to fix any mouse whose owner had renamed it. It is reported, never required.
+//
+// What survives is the check being made TWICE: once in the matching dictionary, which is
+// what keeps the manager from opening anything else, and again here on the device itself,
+// so an error in building that dictionary still cannot turn into a write to other
+// hardware.
 static int is_target(IOHIDDeviceRef dev) {
     int32_t vid = 0, pid = 0;
     if (!int_prop(dev, CFSTR(kIOHIDVendorIDKey), &vid)) return 0;
     if (!int_prop(dev, CFSTR(kIOHIDProductIDKey), &pid)) return 0;
-    if (vid != APPLE_VENDOR_ID || !pid_allowed(pid)) return 0;
-
-    char name[256];
-    if (!str_prop(dev, CFSTR(kIOHIDProductKey), name, sizeof(name))) return 0;
-    return strstr(name, PRODUCT_SUBSTRING) != NULL;
+    return vendor_allowed(vid) && pid_allowed(pid);
 }
 
 // ---------------------------------------------------------------------------
@@ -215,7 +257,10 @@ static int send_to_all(IOHIDManagerRef mgr) {
             char    name[256];
             int_prop(list[i], CFSTR(kIOHIDVendorIDKey), &vid);
             int_prop(list[i], CFSTR(kIOHIDProductIDKey), &pid);
-            str_prop(list[i], CFSTR(kIOHIDProductKey), name, sizeof(name));
+            // Purely for the operator to recognise the device. A mouse with no product
+            // string is still a valid target — the ids are what decided it.
+            if (!str_prop(list[i], CFSTR(kIOHIDProductKey), name, sizeof(name)))
+                snprintf(name, sizeof(name), "%s", UNNAMED_DEVICE);
             log_line("would send F1 06 01 37 to \"%s\" (vid 0x%04X pid 0x%04X)",
                      name, (unsigned)vid, (unsigned)pid);
             continue;
@@ -319,15 +364,20 @@ static CFDictionaryRef make_match(int32_t vid, int32_t pid) {
 // Restricts the manager to the allow-list. This is the difference that keeps a root daemon
 // from holding every keyboard on the machine open.
 static int apply_matching(IOHIDManagerRef mgr) {
-    CFMutableArrayRef all = CFArrayCreateMutable(kCFAllocatorDefault, (CFIndex)g_pid_count,
-                                                 &kCFTypeArrayCallBacks);
+    CFMutableArrayRef all = CFArrayCreateMutable(
+        kCFAllocatorDefault, (CFIndex)(g_pid_count * APPLE_VENDOR_COUNT),
+        &kCFTypeArrayCallBacks);
     if (!all) return 0;
 
-    for (size_t i = 0; i < g_pid_count; i++) {
-        CFDictionaryRef m = make_match(APPLE_VENDOR_ID, g_pids[i]);
-        if (!m) continue;
-        CFArrayAppendValue(all, m);
-        CFRelease(m);
+    // One entry per (vendor id, product id) pair: the same mouse reports a different
+    // vendor id over Bluetooth than over USB.
+    for (size_t v = 0; v < APPLE_VENDOR_COUNT; v++) {
+        for (size_t i = 0; i < g_pid_count; i++) {
+            CFDictionaryRef m = make_match(kAppleVendorIds[v], g_pids[i]);
+            if (!m) continue;
+            CFArrayAppendValue(all, m);
+            CFRelease(m);
+        }
     }
 
     if (CFArrayGetCount(all) == 0) { CFRelease(all); return 0; }
