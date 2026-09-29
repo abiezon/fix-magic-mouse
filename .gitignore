@@ -1,0 +1,6 @@
+# Build output — the repo ships source; the binary is built locally, never committed.
+/magicmousefix
+*.dSYM/
+*.o
+
+.DS_Store
